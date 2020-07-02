@@ -12,7 +12,7 @@
       <paths name="greatbme@10.12.43.217:22">
         <serverdata>
           <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
+            <mapping deploy="/home/greatbme/JZY/GCNET_TEST" local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>

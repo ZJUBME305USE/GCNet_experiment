@@ -24,11 +24,12 @@ import MyDataset as MyD
 from models import basic, stackhourglass, submodule
 from processing import display
 import transforms
+import gc_net
 
-parser = argparse.ArgumentParser(description='PSMNet')
-parser.add_argument('--maxdisp', type=int, default=96,
+parser = argparse.ArgumentParser(description='GCNet')
+parser.add_argument('--maxdisp', type=int, default=128,
                     help='maxium disparity')
-parser.add_argument('--model', default='stackhourglass',
+parser.add_argument('--model', default='gc_net',
                     help='select model')
 parser.add_argument('--datapath', default='/home/greatbme/data_plus/Stereo Dataset',
                     help='datapath')
@@ -54,8 +55,8 @@ if args.cuda:
 train_transform_list = [transforms.RandomCrop(480, 608), transforms.RandomColor(),
                         transforms.RandomVerticalFlip(),
                         transforms.ToTensor(),
-                        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-                            ]
+                        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])]
+
 train_transform = transforms.Compose(train_transform_list)
 
 training_transforms = albu.Compose([
@@ -79,8 +80,8 @@ training_transforms = albu.Compose([
             albu.IAAAdditiveGaussianNoise(loc=0, scale=(0.005 * 255, 0.02 * 255), p=0.5)
         ]), ], p=0.6)
 
-if args.model == 'stackhourglass':
-    model = stackhourglass.PSMNet(int(args.maxdisp))
+if args.model == 'gc_net':
+    model = gc_net.GcNet(480,608,int(args.maxdisp))
 elif args.model == 'basic':
     model = basic.PSMNet(int(args.maxdisp))
 else:
@@ -130,6 +131,13 @@ def train(sample):
     mask = mask > 0.6
     b, c, h, w = disp.shape
     count = b
+
+    loss_mul_list = []
+    for d in range(int(args.maxdisp)):
+        loss_mul_temp = Variable(torch.Tensor(np.ones([batch_size, 1, int(h/2), int(w/2)]) * d)).cuda()
+        loss_mul_list.append(loss_mul_temp)
+    loss_mul = torch.cat(loss_mul_list, 1)
+
     for i in range(b):
         if disp[i][mask[i]].numel() < disp[i].numel() * 0.1:
             mask[i] = mask[i] < 0
@@ -137,21 +145,22 @@ def train(sample):
     if count < 1:
         return -1, -1, -1
     optimizer.zero_grad()
-    if args.model == 'stackhourglass':
-        output1, output2, output3 = model(left, right)
-        b, h, w = output1.shape
-        bg, c, hg, wg = disp.shape
-        output1 = output1.unsqueeze(1)
-        output2 = output2.unsqueeze(1)
-        output3 = output3.unsqueeze(1)
-        ds = hg / h
-        output1 = F.upsample(output1, [hg, wg], mode='bilinear')
-        output2 = F.upsample(output2, [hg, wg], mode='bilinear')
-        output3 = F.upsample(output3, [hg, wg], mode='bilinear')
+    if args.model == 'gc_net':
+        tmp_output = model(left, right)
+        tmp_output = tmp_output.squeeze(1)
 
-        output1 = torch.mul(output1, ds)  # 上采样后要乘以采样率
-        output2 = torch.mul(output2, ds)
-        output3 = torch.mul(output3, ds)
+
+        output = torch.sum(tmp_output.mul(loss_mul),1)
+
+        b, h, w = output.shape
+        bg, c, hg, wg = disp.shape
+        output = output.unsqueeze(1)
+
+        ds = hg / h
+        output = F.upsample(output, [hg, wg], mode='bilinear')
+
+        output = torch.mul(output, ds)  # 上采样后要乘以采样率
+
 
         # output1 = torch.squeeze(output1, 1)
         # output2 = torch.squeeze(output2, 1)
@@ -175,24 +184,13 @@ def train(sample):
         # fn = torch.nn.MSELoss()
         # loss = 0.5 * F.smooth_l1_loss(depth1[mask_left], rec_left_gt[mask_left]) + 0.7 * F.smooth_l1_loss(depth2[mask_left], rec_left_gt[mask_left]) + F.smooth_l1_loss(depth3[mask_left], rec_left_gt[mask_left])
 
-        loss = 0.5 * F.smooth_l1_loss(output1[mask], disp[mask]) + 0.7 * F.smooth_l1_loss(output2[mask], disp[mask]) + F.smooth_l1_loss(output3[mask], disp[mask])
 
-    elif args.model == 'basic':
-        output3 = model(ds_left, ds_right)
-        output3 = output3.unsqueeze(1)
-        b, d, h, w = output3.shape
-        bg, c, hg, wg = rec_left_gt.shape
-        ds = hg / h
-        output3 = F.upsample(output3, [hg, wg], mode='bilinear')
-        output3 = torch.mul(output3, ds)
-        output3 = torch.squeeze(output3, 1)
-        depth3 = submodule.reprojection()(output3, reproj_left)
-        loss = F.l1_loss(rec_left_gt[mask_left], depth3[mask_left], size_average=True)
+        loss = F.smooth_l1_loss(output[mask], disp[mask])
 
     loss.backward()
     optimizer.step()
     # display.display_color_disparity_depth(step, writer, ds_left, output3.unsqueeze(1), depth3, is_return_img=False)
-    return loss.item(), count, output3
+    return loss.item(), count, output
 
 
 def Test(sample):
@@ -268,7 +266,7 @@ def adjust_learning_rate(optimizer, epoch):
 
 
 if __name__ == '__main__':
-    batch_size = 8
+    batch_size = 4
     display_interval = 50
     validation_interval = 1
 
